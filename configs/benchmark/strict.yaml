@@ -1,0 +1,69 @@
+# configs/benchmark/strict.yaml
+# -------------------------------------------------------
+# Strict 비교: Legacy vs Revision L1
+# 동일 입력 조건 (transaction graph only)
+# -------------------------------------------------------
+
+setting: "strict"
+
+# ── 데이터 ─────────────────────────────────────────────
+dataset:
+  transactions_root : "../_data/dataset/transactions"
+  labels_path       : "../_data/dataset/labels.csv"
+  global_graph_root : "../_data/dataset/global_graph"
+  chain             : "polygon"
+
+  auto_split        : true
+  train_ratio       : 0.70
+  val_ratio         : 0.15
+  split_seed        : 42
+  normalize_address : true
+
+  label_chain_col: "Chain"
+  label_address_col: "Contract"
+  label_label_col: "Category"
+ 
+  # 데이터 정의서 확인 후 조정
+  normal_categories: [0]
+  fraud_categories: null
+ 
+  load_global_graph: false
+  normalize_features: true
+  
+# ── 평가 공통 ───────────────────────────────────────────
+threshold : 0.5
+k_list    : [10, 20, 50]
+bootstrap : true
+
+# ── 실험군 ON/OFF ───────────────────────────────────────
+run_legacy          : true
+run_revision_l1     : true
+run_revision_l1_l2  : false   # strict에서는 global graph 사용 안 함
+run_revision_full   : false
+
+# ── Legacy 설정 ─────────────────────────────────────────
+legacy:
+  models          : ["DOMINANT", "DONE", "GAE", "AnomalyDAE", "CoLA"]
+  agg_method      : "max"     # max / mean / sum / topk
+  topk            : 3
+  normalize_score : true
+  gpu             : 0
+  hid_dim         : 16
+  num_layers      : 2
+  epoch           : 50
+  lr              : 0.003
+
+# ── Revision Level1 설정 ────────────────────────────────
+level1:
+  in_dim        : 16
+  out_dim       : 1
+  hidden_dim    : 16
+  num_layers    : 3
+  num_classes   : 2
+  dropout       : 0.1
+  conv_type     : sage
+  pooling       : mean
+  lr            : 0.001
+  epochs        : 50
+  batch_size    : 32
+  device        : "cpu"

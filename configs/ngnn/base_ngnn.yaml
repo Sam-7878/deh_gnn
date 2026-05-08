@@ -1,0 +1,32 @@
+# configs/ngnn/base_ngnn.yaml
+
+model:
+  level1:
+    in_dim: 16
+    hidden_dim: 128
+    num_layers: 2
+    dropout: 0.2
+    num_classes: 2
+    conv_type: "sage"
+    
+    # Switch to nGNN encoder
+    encoder_backend: "ngnn"
+    readout: "mean"
+    
+    # nGNN specific parameters
+    ngnn:
+      subgraph_pooling: "main_root"
+      nested_readout: "mean"
+      num_hops: 1
+      max_nodes_per_subgraph: 50
+      root_policy: "all"
+
+# Important for 8GB GPU memory management
+training:
+  batch_size: 64
+  grad_accum_steps: 4
+  mixed_precision: true
+
+data:
+  precomputed_ngnn: true
+  ngnn_artifact_dir: "artifacts/ngnn"

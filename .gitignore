@@ -1,0 +1,63 @@
+# Merge artifacts
+*.orig
+build/
+xbuild/
+_res/
+.venv/
+.pytest_cache/
+.gradle/
+.android/
+.idea/
+.vscode/
+.run/
+.cargo/
+release/
+debug/
+
+# Python bytecode
+__pycache__/
+lightning_logs/
+
+# Graph database files
+docs_stable_coin/work_reports/
+# docs/architecture/
+docs/work_reports/
+# GoG/    
+result/
+results/
+graphs/
+dataset/test/
+data/
+wasm/
+
+# test folders
+# test_01/
+# test_02/
+# test_03/
+tests/mock
+stable_coin/
+
+## stable coin project용 폴더.
+# 아직 오픈 안 함.
+# local currency dex 
+# local_currency_dex/ 
+local_currency_dex_cache/ 
+# api_gateway/ 
+# tests_stable_coin/ 
+frontend_apps/ 
+# yongin_pay_frontend/ 
+
+*.info
+*.address
+# intermediate data files
+*.csv
+
+# Text files
+*.txt 
+*.log
+*.png 
+*.pkl
+*.pt
+
+# notes.
+Crypto-GoG_on_DL_notes.txt

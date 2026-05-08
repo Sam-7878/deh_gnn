@@ -1,0 +1,54 @@
+setting: "strict"
+
+dataset:
+  transactions_root: "../_data/dataset/transactions"
+  cache_root: "../_data/dataset/.cache/graphs"
+  labels_path: "../_data/dataset/labels.csv"
+  global_graph_root: "../_data/dataset/global_graph"
+  chain: "polygon"
+
+  auto_split: true
+  train_ratio: 0.70
+  val_ratio: 0.15
+  split_seed: 42
+  normalize_address: true
+
+  label_chain_col: "Chain"
+  label_address_col: "Contract"
+  label_label_col: "Category"
+  label_split_col: null
+
+  normal_categories: [0]
+  fraud_categories: null
+
+# 아래 설정을 false에서 true로 변경
+  load_global_graph: true
+  chunk_size: 100
+  smoke_test: true
+  normalize_features: true
+
+# ── 평가 공통 ───────────────────────────────────────────
+threshold : 0.5
+k_list    : [10, 20, 50]
+bootstrap : true
+
+legacy:
+  models: ["DOMINANT"]
+  agg_method: "max"
+  topk: 3
+  normalize_score: true
+
+  gpu: -1
+  hid_dim: 32
+  num_layers: 2
+  epoch: 10
+  lr: 0.003
+  weight_decay: 0.0
+  dropout: 0.0
+
+debug:
+  enabled: true
+  max_train_graphs: 64
+  max_val_graphs: 32
+  max_test_graphs: 64
+

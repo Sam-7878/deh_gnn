@@ -1,0 +1,36 @@
+# configs/ngnn/bsc_smoke_ngnn.yaml
+setting: "bsc_ngnn_smoke"
+
+dataset:
+  transactions_root : "../_data/dataset/transactions"
+  labels_path       : "../_data/dataset/labels.csv"
+  global_graph_root : "../_data/dataset/global_graph"
+  chain             : "bsc"
+  auto_split        : true
+  train_ratio       : 0.1
+  val_ratio         : 0.1
+  split_seed        : 42
+  normalize_address : true
+  load_global_graph : true 
+  normalize_features: true
+  smoke_test        : true # This should limit the split graphs in _get_split_graphs
+
+level1:
+  in_dim        : 16
+  out_dim       : 1 
+  hidden_dim    : 64
+  num_layers    : 2
+  dropout       : 0.1
+  conv_type     : sage
+  pooling       : mean
+  lr            : 0.001
+  epochs        : 2
+  batch_size    : 16
+  device        : "cpu"
+  encoder_backend: "ngnn"
+  
+  ngnn:
+    subgraph_pooling: "main_root"
+    nested_readout  : "mean"
+    num_hops        : 1
+    max_nodes_per_subgraph: 50

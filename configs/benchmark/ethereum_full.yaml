@@ -1,0 +1,82 @@
+# configs/benchmark/full_system.yaml
+# -------------------------------------------------------
+# Full-System 4-way Benchmark
+# (A) Legacy baseline : DOMINANT / DONE / GAE / AnomalyDAE / CoLA
+# (B) Revision L1     : Level1 only
+# (C) Revision L1+L2  : Level1 + Level2
+# (D) Revision Full   : Level1 + Level2 + Fusion
+# -------------------------------------------------------
+
+setting: "full_system"
+
+# ── 데이터 ─────────────────────────────────────────────
+dataset:
+  transactions_root : "../_data/dataset/transactions"
+  labels_path       : "../_data/dataset/labels.csv"
+  global_graph_root : "../_data/dataset/global_graph"
+  chain             : "ethereum"  # User mentioned polygon, ethereum, bsc
+
+  auto_split        : true
+  train_ratio       : 0.70
+  val_ratio         : 0.15
+  split_seed        : 42
+  normalize_address : true
+
+  label_chain_col: "Chain"
+  label_address_col: "Contract"
+  label_label_col: "Category"
+ 
+  normal_categories: [0]
+  fraud_categories: null
+ 
+  load_global_graph: true       # L2를 위해 Global Graph 로딩 필수
+  normalize_features: true      # NaN 방지
+  
+# ── 평가 공통 ───────────────────────────────────────────
+threshold : 0.5
+k_list    : [10, 20, 50]
+bootstrap : true
+
+# ── 실험군 ON/OFF ───────────────────────────────────────
+run_legacy          : true
+run_revision_l1     : true
+run_revision_l1_l2  : true
+run_revision_full   : true
+
+# ── Legacy 설정 ─────────────────────────────────────────
+legacy:
+  models          : ["DOMINANT", "DONE", "GAE", "AnomalyDAE", "CoLA"]
+  agg_method      : "max"     # max / mean / sum / topk
+  topk            : 3
+  normalize_score : true
+  gpu             : 0
+  hid_dim         : 16
+  num_layers      : 2
+  epoch           : 50
+  lr              : 0.003
+
+# ── Revision Level1 설정 ────────────────────────────────
+level1:
+  in_dim        : 16
+  out_dim       : 1       # 이진 분류 시 1이어야 함 (버그 수정 반영)
+  hidden_dim    : 16
+  num_layers    : 3
+  num_classes   : 2
+  dropout       : 0.1
+  conv_type     : sage
+  pooling       : mean
+  lr            : 0.001
+  epochs        : 50
+  batch_size    : 32
+  device        : "cpu"
+
+# ── Revision Level2 설정 ────────────────────────────────
+level2:
+  eval_chunk_size: 16
+  train_chunk_size: 16
+  # 나머지 하이퍼파라미터는 기본값(Level2ModelConfig)을 따름
+
+# ── Revision Fusion 설정 ────────────────────────────────
+fusion:
+  # 기본 모델 하이퍼파라미터를 따름
+  pass

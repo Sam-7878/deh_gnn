@@ -1,0 +1,27 @@
+{
+    "DOMINANT": {
+        "hid_dim": 16,
+        "lr": 0.03,
+        "epoch": 120
+    },
+    "DONE": {
+        "hid_dim": 16,
+        "lr": 0.02,
+        "epoch": 40
+    },
+    "GAE": {
+        "hid_dim": 12,
+        "lr": 0.005,
+        "epoch": 30
+    },
+    "AnomalyDAE": {
+        "hid_dim": 16,
+        "lr": 0.02,
+        "epoch": 20
+    },
+    "CoLA": {
+        "hid_dim": 16,
+        "lr": 0.003,
+        "epoch": 20
+    }
+}

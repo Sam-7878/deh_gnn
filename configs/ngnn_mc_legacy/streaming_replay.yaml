@@ -1,0 +1,69 @@
+# configs/ngnn_mc/streaming_replay.yaml
+dataset:
+  transactions_root: "../_data/dataset/transactions"
+  labels_path: "../_data/dataset/labels.csv"
+  global_graph_root: "../_data/dataset/global_graph"
+  chain: "polygon"  # Default chain
+  auto_split: true
+  train_ratio: 0.70
+  val_ratio: 0.15
+  split_seed: 42
+  normalize_address: true
+  label_chain_col: "Chain"
+  label_address_col: "Contract"
+  label_label_col: "Category"
+  normal_categories: [0]
+  fraud_categories: null
+  load_global_graph: true 
+  normalize_features: true
+
+streaming:
+  mode: "virtual" # 'virtual' or 'wallclock'
+  compressed_duration_sec: 3600
+  tick_granularity_sec: 1.0
+
+level1:
+  encoder_backend: "ngnn"
+  in_dim: 3
+  out_dim: 1 
+  hidden_dim: 64
+  num_layers: 2
+  num_classes: 2
+  dropout: 0.1
+  conv_type: "sage"
+  pooling: "mean"
+  lr: 0.001
+  epochs: 30
+  batch_size: 64
+  device: "cuda"
+  
+  ngnn:
+    subgraph_pooling: "main_root"
+    nested_readout: "mean"
+    num_hops: 1
+    max_nodes_per_subgraph: 50
+    root_policy: "all"
+
+level2:
+  hidden_dim: 128
+  epochs: 5
+  batch_size: 128
+  eval_chunk_size: 16
+  train_chunk_size: 16
+
+mc_samples: 8
+dropout_p: 0.10
+
+setting: "ngnn_mc_streaming"
+output_dir: "results/benchmark_ngnn_mc_legacy_streaming"
+
+legacy:
+  models: ["DOMINANT", "DONE", "GAE", "AnomalyDAE", "CoLA"]
+  agg_method: "max"
+  topk: 3
+  normalize_score: true
+  gpu: 0
+  hid_dim: 16
+  num_layers: 2
+  epoch: 50
+  lr: 0.003

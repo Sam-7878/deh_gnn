@@ -1,0 +1,31 @@
+# configs/mc/streaming_replay.yaml
+dataset:
+  transactions_root: "../_data/dataset/transactions"
+  labels_path: "../_data/dataset/labels.csv"
+  global_graph_root: "../_data/dataset/global_graph"
+  chain: "polygon"
+  load_global_graph: true
+
+streaming:
+  mode: "virtual" # 'virtual' or 'wallclock'
+  compressed_duration_sec: 3600
+  tick_granularity_sec: 1.0
+
+level1:
+  encoder_backend: "gnn"
+  in_dim: 3
+  out_dim: 1
+  epochs: 2 # Faster warmup
+  batch_size: 128
+  lr: 0.001
+
+level2:
+  hidden_dim: 128
+  epochs: 2
+  batch_size: 128
+
+mc_samples: 8
+dropout_p: 0.10
+
+setting: "mc_streaming"
+output_dir: "results/benchmark_mc_streaming"

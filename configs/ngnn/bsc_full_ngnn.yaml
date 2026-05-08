@@ -1,0 +1,86 @@
+# configs/ngnn/bsc_full_ngnn.yaml
+# -------------------------------------------------------
+# Full-System 4-way Benchmark using nGNN for Level 1
+# -------------------------------------------------------
+
+setting: "bsc_ngnn_full_system"
+output_dir: "results/benchmark_ngnn"
+
+# ── 데이터 ─────────────────────────────────────────────
+dataset:
+  transactions_root : "../_data/dataset/transactions"
+  labels_path       : "../_data/dataset/labels.csv"
+  global_graph_root : "../_data/dataset/global_graph"
+  chain             : "bsc"  # User mentioned BSC
+
+  auto_split        : true
+  train_ratio       : 0.70
+  val_ratio         : 0.15
+  split_seed        : 42
+  normalize_address : true
+
+  label_chain_col: "Chain"
+  label_address_col: "Contract"
+  label_label_col: "Category"
+ 
+  normal_categories: [0]
+  fraud_categories: null
+ 
+  load_global_graph: true 
+  normalize_features: true
+  
+# ── 평가 공통 ───────────────────────────────────────────
+threshold : 0.5
+k_list    : [10, 20, 50]
+bootstrap : true
+
+# ── 실험군 ON/OFF ───────────────────────────────────────
+run_legacy          : true
+run_revision_l1     : true
+run_revision_l1_l2  : true
+run_revision_full   : true
+
+# ── Legacy 설정 ─────────────────────────────────────────
+legacy:
+  models          : ["DOMINANT", "DONE", "GAE", "AnomalyDAE", "CoLA"]
+  agg_method      : "max"
+  topk            : 3
+  normalize_score : true
+  gpu             : 0
+  hid_dim         : 16
+  num_layers      : 2
+  epoch           : 50
+  lr              : 0.003
+
+# ── Revision Level1 + nGNN 설정 ─────────────────────────
+level1:
+  in_dim        : 16
+  out_dim       : 1 
+  hidden_dim    : 64
+  num_layers    : 2
+  num_classes   : 2
+  dropout       : 0.1
+  conv_type     : sage
+  pooling       : mean
+  lr            : 0.001
+  epochs        : 30
+  batch_size    : 64      # User requested modification
+  device        : "cuda"
+
+  encoder_backend: "ngnn" # Switching to the newly implemented nGNN backend
+  
+  ngnn:
+    subgraph_pooling: "main_root"
+    nested_readout: "mean"
+    num_hops: 1
+    max_nodes_per_subgraph: 50
+    root_policy: "all"
+
+# ── Revision Level2 설정 ────────────────────────────────
+level2:
+  eval_chunk_size: 16
+  train_chunk_size: 16
+
+# ── Revision Fusion 설정 ────────────────────────────────
+fusion:
+  pass
