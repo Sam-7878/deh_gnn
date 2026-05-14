@@ -1,6 +1,6 @@
-# DeH-GNN (Decoupled Hierarchical Graph Neural Network)
+# DLG-GNN (Decoupled Hierarchical Graph Neural Network)
 
-**DeH-GNN**은 GoatBank 생태계의 핵심 보안 및 자금 세탁 방지(AML) 인프라로 작동하는 계층형 그래프 신경망 기반 사기 탐지 엔진입니다. 
+**DLG-GNN**은 GoatBank 생태계의 핵심 보안 및 자금 세탁 방지(AML) 인프라로 작동하는 계층형 그래프 신경망 기반 사기 탐지 엔진입니다. 
 
 ## 🚀 Overview
 기존 상용 AML 솔루션의 한계를 극복하고 멀티 체인(Ethereum, BSC, Polygon) 상에서 발생하는 복잡하고 은닉된 자금 세탁 패턴을 실시간으로 탐지합니다. 단일 그래프 추론의 한계를 뛰어넘어 Level 1(개별 하위 그래프 특성)과 Level 2(하위 그래프 간의 메타 릴레이션)를 분리하여 학습하는 **계층적 아키텍처**를 채택했습니다.
