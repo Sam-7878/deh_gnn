@@ -1,198 +1,178 @@
+"""
+DLG - Decoupled Local-to-Global Graph Neural Network Detector
+
+A PyGOD-compatible detector that properly inherits from DeepDetector,
+using GCN-based encoders for both local and global pattern detection.
+"""
+
 import torch
-import torch.nn as nn
-from typing import Optional, Any
-from torch_geometric.data import Data
+from torch_geometric.nn import GCN
 
-try:
-    from pygod.models import BaseDetector
-except ImportError:
-    # Fallback if pygod is not installed in the current environment
-    class BaseDetector:
-        """Dummy BaseDetector for compatibility."""
-        def __init__(self, **kwargs):
-            self.epoch = kwargs.get('epoch', 100)
-            self.lr = kwargs.get('lr', 0.004)
-            self.weight_decay = kwargs.get('weight_decay', 0.0)
-            self.batch_size = kwargs.get('batch_size', 64)
-            self.gpu = kwargs.get('gpu', -1)
-            self.verbose = kwargs.get('verbose', 0)
+from pygod.detector.base import DeepDetector
+from .dlg_base import DLGBase
 
-from .data_adapter import DataAdapter
 
-class DLG(BaseDetector):
+class DLG(DeepDetector):
     """
     Decoupled Local-to-Global Graph Neural Network (DLG)
     
-    A PyGOD-compatible wrapper for the DLG model, which extracts local subgraph 
-    patterns (Level 1) and global relational patterns (Level 2), and fuses them
-    for robust Graph Outlier/Fraud Detection.
+    DLG is an anomaly detector that decouples graph anomaly detection into
+    two levels:
+    
+    - **Level 1 (Local)**: A GCN encoder captures neighborhood-level
+      anomalous patterns within k-hop ego-nets.
+    - **Level 2 (Global)**: A GCN encoder captures graph-wide relational
+      anomaly patterns using the local embeddings.
+    
+    The two levels are fused via a learnable gating mechanism, and anomaly
+    scores are computed as weighted reconstruction errors for both node
+    attributes and graph structure (similar to DOMINANT, but with the 
+    Decoupled Local-to-Global architecture).
+    
+    Parameters
+    ----------
+    hid_dim : int, optional
+        Hidden dimension of model. Default: ``64``.
+    num_layers : int, optional
+        Total number of layers in model. Split between local encoder, 
+        global encoder, and decoder. Default: ``4``.
+    dropout : float, optional
+        Dropout rate. Default: ``0.``.
+    weight_decay : float, optional
+        Weight decay (L2 penalty). Default: ``0.``.
+    act : callable activation function or None, optional
+        Activation function if not None. Default: ``torch.nn.functional.relu``.
+    alpha : float, optional
+        Learnable fusion weight between local and global embeddings.
+        Default: ``0.5``.
+    sigmoid_s : bool, optional
+        Whether to apply sigmoid to reconstructed structure. Default: ``False``.
+    backbone : torch.nn.Module, optional
+        The GNN backbone. Default: ``torch_geometric.nn.GCN``.
+    contamination : float, optional
+        Proportion of outliers in the dataset. Default: ``0.1``.
+    lr : float, optional
+        Learning rate. Default: ``0.004``.
+    epoch : int, optional
+        Maximum number of training epochs. Default: ``100``.
+    gpu : int, optional
+        GPU Index, -1 for CPU. Default: ``-1``.
+    batch_size : int, optional
+        Minibatch size, 0 for full batch. Default: ``0``.
+    num_neigh : int, optional
+        Number of neighbors in sampling, -1 for all. Default: ``-1``.
+    weight : float, optional
+        Weight between attribute and structure reconstruction error.
+        Default: ``0.5``.
+    verbose : int, optional
+        Verbosity mode. Default: ``0``.
+    save_emb : bool, optional
+        Whether to save the embedding. Default: ``False``.
+    compile_model : bool, optional
+        Whether to compile the model. Default: ``False``.
+    **kwargs : optional
+        Additional arguments for the backbone.
+
+    Examples
+    --------
+    >>> from pygod.utils import load_data
+    >>> from gog_fraud.models.pygod import DLG
+    >>> data = load_data("cora")
+    >>> model = DLG(epoch=100)
+    >>> model.fit(data)
+    >>> score = model.decision_function(data)
     """
 
     def __init__(self,
-                 level1_dim: int = 64,
-                 level2_dim: int = 64,
-                 mc_dropout_rate: float = 0.1,
-                 process_mode: str = "batch",
-                 l1_hops: int = 2,
-                 subgraph_batch_size: int = 256,
-                 epoch: int = 100,
-                 lr: float = 0.004,
-                 weight_decay: float = 0.0,
-                 batch_size: int = 64,
-                 gpu: int = -1,
-                 verbose: int = 0,
+                 hid_dim=64,
+                 num_layers=4,
+                 dropout=0.,
+                 weight_decay=0.,
+                 act=torch.nn.functional.relu,
+                 alpha=0.5,
+                 sigmoid_s=False,
+                 backbone=GCN,
+                 contamination=0.1,
+                 lr=4e-3,
+                 epoch=100,
+                 gpu=-1,
+                 batch_size=0,
+                 num_neigh=-1,
+                 weight=0.5,
+                 verbose=0,
+                 save_emb=False,
+                 compile_model=False,
                  **kwargs):
-        """
-        Args:
-            level1_dim (int): Hidden dimension for Level 1 (Local) model.
-            level2_dim (int): Hidden dimension for Level 2 (Global) model.
-            mc_dropout_rate (float): Dropout rate for Monte Carlo estimation.
-            process_mode (str): "batch" for standard processing, "streaming" for real-time.
-            l1_hops (int): Number of hops for Level 1 local subgraph extraction.
-            subgraph_batch_size (int): Partition size for Level 1 subgraph extraction to save memory.
-            epoch (int): Number of training epochs.
-            lr (float): Learning rate.
-            weight_decay (float): Weight decay.
-            batch_size (int): Batch size.
-            gpu (int): GPU ID to use. -1 for CPU.
-            verbose (int): Verbosity mode.
-        """
-        super(DLG, self).__init__(epoch=epoch,
-                                  lr=lr,
-                                  weight_decay=weight_decay,
-                                  batch_size=batch_size,
-                                  gpu=gpu,
-                                  verbose=verbose,
-                                  **kwargs)
         
-        self.level1_dim = level1_dim
-        self.level2_dim = level2_dim
-        self.mc_dropout_rate = mc_dropout_rate
-        self.process_mode = process_mode
-        self.l1_hops = l1_hops
-        self.subgraph_batch_size = subgraph_batch_size
-        
-        self.data_adapter = DataAdapter(
-            mode=self.process_mode, 
-            l1_hops=self.l1_hops,
-            subgraph_batch_size=self.subgraph_batch_size
+        super(DLG, self).__init__(
+            hid_dim=hid_dim,
+            num_layers=num_layers,
+            dropout=dropout,
+            weight_decay=weight_decay,
+            act=act,
+            backbone=backbone,
+            contamination=contamination,
+            lr=lr,
+            epoch=epoch,
+            gpu=gpu,
+            batch_size=batch_size,
+            num_neigh=num_neigh,
+            verbose=verbose,
+            save_emb=save_emb,
+            compile_model=compile_model,
+            **kwargs
         )
         
-        self.level1_model = None
-        self.level2_model = None
-        self.fusion_model = None
-        
-        self.device = torch.device(f'cuda:{gpu}' if gpu >= 0 and torch.cuda.is_available() else 'cpu')
+        self.alpha = alpha
+        self.weight = weight
+        self.sigmoid_s = sigmoid_s
 
-    def process_graph(self, data: Data) -> Any:
-        """
-        Process the PyG Data object into DLG specific formats using DataAdapter.
-        """
-        return self.data_adapter.adapt(data)
+    def process_graph(self, data):
+        """Compute dense adjacency for structure reconstruction."""
+        DLGBase.process_graph(data)
 
-    def _build_model(self):
+    def init_model(self, **kwargs):
+        """Initialize the DLGBase neural network."""
+        if self.save_emb:
+            self.emb = torch.zeros(self.num_nodes, self.hid_dim)
+        return DLGBase(
+            in_dim=self.in_dim,
+            hid_dim=self.hid_dim,
+            num_layers=self.num_layers,
+            dropout=self.dropout,
+            act=self.act,
+            alpha=self.alpha,
+            sigmoid_s=self.sigmoid_s,
+            backbone=self.backbone,
+            **kwargs
+        ).to(self.device)
+
+    def forward_model(self, data):
         """
-        Initializes the internal PyTorch modules for Level 1, Level 2, and Fusion.
-        """
-        self.level1_model = nn.Linear(10, self.level1_dim).to(self.device)
-        self.level2_model = nn.Linear(self.level1_dim, self.level2_dim).to(self.device)
-        self.fusion_model = nn.Linear(self.level1_dim + self.level2_dim, 1).to(self.device)
+        Forward pass: encode → decode → compute reconstruction anomaly score.
         
-        self.optimizer = torch.optim.Adam(
-            list(self.level1_model.parameters()) + 
-            list(self.level2_model.parameters()) + 
-            list(self.fusion_model.parameters()),
-            lr=self.lr,
-            weight_decay=self.weight_decay
+        This follows the same protocol as DOMINANT's forward_model,
+        ensuring full compatibility with PyGOD's DeepDetector training loop.
+        """
+        batch_size = data.batch_size
+        node_idx = data.n_id
+
+        x = data.x.to(self.device)
+        s = data.s.to(self.device)
+        edge_index = data.edge_index.to(self.device)
+
+        # Forward through DLG's Decoupled Local-to-Global architecture
+        x_, s_ = self.model(x, edge_index)
+
+        # Compute per-node anomaly score (reconstruction error)
+        score = self.model.loss_func(
+            x[:batch_size],
+            x_[:batch_size],
+            s[:batch_size, node_idx],
+            s_[:batch_size],
+            self.weight
         )
 
-    def fit(self, data: Data, label: Optional[torch.Tensor] = None):
-        """
-        Fit the DLG model.
-        """
-        self._build_model()
-        l1_batches, l2_data = self.process_graph(data)
-        
-        self.level1_model.train()
-        self.level2_model.train()
-        self.fusion_model.train()
-        
-        if self.verbose:
-            print(f"Training DLG for {self.epoch} epochs on {self.device}...")
-            
-        for ep in range(self.epoch):
-            self.optimizer.zero_grad()
-            
-            # Step 1: Process Level 1 Batches to get L1 embeddings
-            l1_embeddings = []
-            
-            # Handling both List (batch) and Generator (streaming)
-            for batch in l1_batches:
-                batch = batch.to(self.device)
-                # Dummy forward pass: in reality, pass batch.x, batch.edge_index to Level1GNN
-                # Extract embeddings only for the center nodes
-                out = self.level1_model(batch.x)
-                center_emb = out[batch.center_mapping]
-                l1_embeddings.append(center_emb)
-            
-            l1_full_emb = torch.cat(l1_embeddings, dim=0) # [N, level1_dim]
-            
-            # Step 2: Process Level 2 Graph using L1 embeddings as node features
-            l2_data = l2_data.to(self.device)
-            l2_out = self.level2_model(l1_full_emb) # Dummy forward
-            
-            # Step 3: Fusion
-            score = self.fusion_model(torch.cat([l1_full_emb, l2_out], dim=-1)).squeeze(-1)
-            
-            # Simulated loss for demonstration
-            loss = torch.mean(score) if label is None else torch.nn.functional.binary_cross_entropy_with_logits(score, label.float().to(self.device))
-            loss.backward()
-            self.optimizer.step()
-            
-            # If generator was consumed, we need to adapt again for the next epoch
-            # (In streaming mode, generator is exhausted after one loop)
-            if self.process_mode == "streaming" and ep < self.epoch - 1:
-                l1_batches, l2_data = self.process_graph(data)
-            
-            if self.verbose and ep % 10 == 0:
-                print(f"Epoch {ep:03d}/{self.epoch:03d} | Loss: {loss.item():.4f}")
-        
-        return self
+        loss = torch.mean(score)
 
-    def decision_function(self, data: Data) -> torch.Tensor:
-        """
-        Predict raw anomaly scores.
-        """
-        self.level1_model.eval()
-        self.level2_model.eval()
-        self.fusion_model.eval()
-        
-        l1_batches, l2_data = self.process_graph(data)
-        
-        with torch.no_grad():
-            l1_embeddings = []
-            for batch in l1_batches:
-                batch = batch.to(self.device)
-                out = self.level1_model(batch.x)
-                center_emb = out[batch.center_mapping]
-                l1_embeddings.append(center_emb)
-            
-            l1_full_emb = torch.cat(l1_embeddings, dim=0)
-            
-            l2_data = l2_data.to(self.device)
-            l2_out = self.level2_model(l1_full_emb)
-            
-            score = self.fusion_model(torch.cat([l1_full_emb, l2_out], dim=-1)).squeeze(-1)
-            
-        return score
-
-    def predict(self, data: Data, return_confidence: bool = False, threshold: float = 0.5):
-        """
-        Predict binary anomalies.
-        """
-        score = self.decision_function(data)
-        pred = (torch.sigmoid(score) > threshold).long()
-        
-        if return_confidence:
-            return pred, torch.sigmoid(score)
-        return pred
+        return loss, score.detach().cpu()

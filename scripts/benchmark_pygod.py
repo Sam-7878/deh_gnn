@@ -10,8 +10,9 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
-from pygod.utils import load_data
-from pygod.models import DOMINANT
+from pygod.detector import DOMINANT
+from torch_geometric.datasets import Planetoid
+from pygod.generator import gen_contextual_outlier, gen_structural_outlier
 
 from gog_fraud.models.pygod.dlg import DLG
 
@@ -85,16 +86,29 @@ def track_performance(model, data, model_name="Model"):
     print(f"[SUCCESS] {model_name} Evaluation Complete.")
     return results
 
+def get_cora_with_outliers():
+    """Load Cora using PyG and inject anomalies manually to bypass PyGOD download errors."""
+    print("[INFO] Downloading/Loading original Cora dataset...")
+    dataset = Planetoid(root='/tmp/Cora', name='Cora')
+    data = dataset[0]
+    
+    print("[INFO] Injecting contextual and structural outliers...")
+    # Inject 100 contextual outliers
+    data, yc = gen_contextual_outlier(data, n=100, k=50, seed=42)
+    # Inject 10 structural cliques of 10 nodes (100 outliers)
+    data, ys = gen_structural_outlier(data, m=10, n=10, seed=42)
+    
+    # Combine anomaly labels
+    data.y = torch.logical_or(yc, ys).long()
+    return data
+
 def main():
     print("========================================")
     print("      PyGOD Benchmark: DOMINANT vs DLG  ")
     print("========================================")
     
     # 1. Load Data
-    print("[INFO] Loading Cora dataset with injected anomalies...")
-    # pygod's load_data automatically injects structural and contextual anomalies 
-    # into standard datasets like 'cora' if they are not naturally anomalous.
-    data = load_data("cora")
+    data = get_cora_with_outliers()
     print(f"[INFO] Data Loaded: {data.x.size(0)} nodes, {data.edge_index.size(1)} edges.")
     print(f"[INFO] Anomaly ratio: {data.y.sum().item() / data.y.size(0):.4f}")
     
@@ -106,11 +120,10 @@ def main():
     # DOMINANT
     dominant = DOMINANT(epoch=epoch, gpu=gpu_id, verbose=0)
     
-    # DLG Wrapper
+    # DLG (Decoupled Local-to-Global)
     dlg = DLG(
         epoch=epoch, 
         gpu=gpu_id, 
-        subgraph_batch_size=256, # The specific partitioning advantage
         verbose=0
     )
     
