@@ -1,4 +1,4 @@
-# DLG-GNN (Decoupled Hierarchical Graph Neural Network)
+# DLG-GNN (Decoupled Local-to-Global Graph Neural Network)
 
 **DLG-GNN**은 GoatBank 생태계의 핵심 보안 및 자금 세탁 방지(AML) 인프라로 작동하는 계층형 그래프 신경망 기반 사기 탐지 엔진입니다. 
 
