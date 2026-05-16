@@ -203,4 +203,4 @@ class DLGBase(nn.Module):
     @staticmethod
     def process_graph(data):
         """Compute dense adjacency matrix for structure reconstruction."""
-        data.s = to_dense_adj(data.edge_index)[0]
+        data.s = to_dense_adj(data.edge_index, max_num_nodes=data.num_nodes)[0]
