@@ -67,7 +67,7 @@ REPORT_DIR = os.path.abspath(os.path.join(
 # 16384² × 4 bytes = ~1GB per partition → perfectly utilizes VRAM while staying safe.
 PARTITION_SIZE = 16384
 DGraphFin_PARTITION_SIZE = 4096
-Yelp_PARTITION_SIZE = 6144
+Yelp_PARTITION_SIZE = 4096
 
 # Subsample limit removed. With GPU acceleration and graph partitioning,
 # even massive datasets like DGraphFin (3.7M) and Yelp (716K) can be fully processed.
@@ -91,7 +91,7 @@ def _inject_outliers(data, contextual_ratio=0.03, structural_ratio=0.03, m_cliqu
 
 
 def _repackage_graph(data):
-    """Repackage graph with self-loops and edge validation.
+    """Repackage graph with self-loops, edge validation, and feature sanitization.
     Adapted from legacy_adapter._repackage_minimal — proven on Ethereum graphs.
     """
     from torch_geometric.utils import add_self_loops, coalesce
@@ -111,7 +111,14 @@ def _repackage_graph(data):
     edge_index, _ = add_self_loops(edge_index, num_nodes=num_nodes)
     edge_index = coalesce(edge_index)
 
-    clean = PyGData(x=data.x.float(), edge_index=edge_index, num_nodes=num_nodes)
+    # Sanitize features: replace NaN/Inf with 0 (critical for Yelp)
+    x = data.x.float()
+    nan_count = torch.isnan(x).sum().item() + torch.isinf(x).sum().item()
+    if nan_count > 0:
+        print(f"    ⚠ Sanitized {nan_count:,} NaN/Inf values in features")
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+    clean = PyGData(x=x, edge_index=edge_index, num_nodes=num_nodes)
     if hasattr(data, 'y') and data.y is not None:
         clean.y = data.y
     return clean
@@ -372,17 +379,14 @@ def evaluate_model(model_class, model_name, data, ds_name, is_dlg=False, epoch=5
         
     # current_partition_size = DGraphFin_PARTITION_SIZE if ds_name == "DGraphFin" else PARTITION_SIZE
 
-    use_partition = (model_name in DENSE_ADJ_MODELS and n_nodes > current_partition_size)
+    use_partition = (n_nodes > current_partition_size)
 
     # ── Adaptive batch size & neighbor sampling ──
     if model_name in DENSE_ADJ_MODELS:
         batch_size = 0   # Full-batch required for dense-adj models
         num_neigh = -1
-    elif n_nodes > 10000:
-        batch_size = current_partition_size
-        num_neigh = 10
     else:
-        batch_size = 0
+        batch_size = 0   # Partitioned graphs are small enough for full-batch
         num_neigh = -1
 
     process = psutil.Process()
@@ -419,6 +423,13 @@ def evaluate_model(model_class, model_name, data, ds_name, is_dlg=False, epoch=5
             print("→ ", end="", flush=True)
             scores_np = np.concatenate(all_scores)
             y_true = np.concatenate(all_labels)
+            
+            # Handle NaN scores from degenerate partitions
+            nan_mask = np.isnan(scores_np) | np.isinf(scores_np)
+            if nan_mask.any():
+                nan_pct = nan_mask.sum() / len(scores_np) * 100
+                print(f"(⚠ {nan_pct:.1f}% NaN scores replaced) ", end="", flush=True)
+                scores_np = np.nan_to_num(scores_np, nan=0.0, posinf=0.0, neginf=0.0)
         else:
             # ── FULL-GRAPH MODE ──
             try:
