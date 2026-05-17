@@ -1,29 +1,33 @@
 """
 Extended Benchmark Pipeline for DLG SCI Paper
 ==============================================
-Compares 6 models across up to 10 diverse-domain datasets.
+Compares 8 models across up to 10 diverse-domain datasets.
 
-Models (5 strong Fraud Detection baselines + DLG):
+Models (6 strong PyGOD baselines + 2 DLG variants):
   - DOMINANT    — GCN Autoencoder (foundational baseline)
+  - AnomalyDAE  — Dual Autoencoder (attribute + structure)
   - CoLA        — Contrastive subgraph-level detection
   - CONAD       — Contrastive + Data Augmentation (DOMINANT enhanced)
   - GADNR       — Neighborhood Reconstruction (2024 SOTA)
   - OCGNN       — One-Class GCN (SVM-style boundary)
-  - DLG         — Decoupled Local-to-Global (ours)
+  - DLG-Base    — Decoupled Local-to-Global (L2 only, no L1 pre-training)
+  - DLG         — Full Decoupled Local-to-Global (L1→L2 pipeline, ours)
 
 Datasets (diverse domains, increasing scale):
   ── Fraud / AML / Financial ──────────────────────────────
   1. Elliptic     (203,769 nodes)  — Bitcoin AML (licit vs illicit)
   2. DGraphFin    (3,700,550 nodes) — Large-scale Financial Loan Fraud
   3. Yelp         (716,847 nodes)  — Review Spam / Fraud
+  4. Amazon       (11,944 nodes)   — E-commerce Review Fraud
+  ── Blockchain / Trust ───────────────────────────────────
+  5. BitcoinOTC   (5,881 nodes)    — Bitcoin Trust Network
   ── Social Network Anomaly ───────────────────────────────
-  4. Twitch-EN    (7,126 nodes)    — Bot / Sybil Detection
-  5. Flickr       (89,250 nodes)   — Spam Account Detection
-  6. Reddit       (232,965 nodes)  — Troll / Sybil Detection
+  6. Flickr       (89,250 nodes)   — Spam Account Detection
+  7. Reddit       (232,965 nodes)  — Troll / Sybil Detection
   ── Citation (Sanity Check + Baseline) ───────────────────
-  7. Cora         (2,708 nodes)    — Small-scale sanity check
-  8. CiteSeer     (3,327 nodes)    — Cross-domain validation
-  9. PubMed       (19,717 nodes)   — Medium-scale medical
+  8. Cora         (2,708 nodes)    — Small-scale sanity check
+  9. CiteSeer     (3,327 nodes)    — Cross-domain validation
+  10. PubMed      (19,717 nodes)   — Medium-scale medical
 
 All datasets are stored in: /mnt/d/_Work/_data/DLG/<dataset_name>/
 """
@@ -40,15 +44,21 @@ import pandas as pd
 from torch_geometric.datasets import (
     Planetoid, Flickr, Reddit,
     EllipticBitcoinDataset, Yelp,
+    Amazon, BitcoinOTC,
 )
 from pygod.generator import gen_contextual_outlier, gen_structural_outlier
 
 # PyGOD Baselines
-from pygod.detector import DOMINANT, CoLA, CONAD, OCGNN
+## GUIDE is not supported yet.
+## GUIDE model is too time consuming.
+# from pygod.detector import DOMINANT, AnomalyDAE, CoLA, CONAD, GUIDE, OCGNN
+from pygod.detector import DOMINANT, AnomalyDAE, CoLA, CONAD, OCGNN
 
 # Ensure local src is in path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
-from gog_fraud.models.pygod.dlg import DLG
+from gog_fraud.models.pygod.dlg import DLG as DLGBase
+from gog_fraud.models.pygod.dlg_full import DLGFull as DLG
+from gog_fraud.models.pygod.gadnr import GADNR
 
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 import warnings
@@ -60,7 +70,7 @@ warnings.filterwarnings("ignore")
 DATA_ROOT = "/mnt/d/_Work/_data/DLG"
 REPORT_DIR = os.path.abspath(os.path.join(
     os.path.dirname(__file__),
-    '../docs/work_reports/24-sci_paper_5x5_benchmark_framework'
+    '../docs/work_reports/25-dlg_full_pipeline_benchmark'
 ))
 
 # Partition size for dense-adj models (DOMINANT, CONAD, DLG).
@@ -68,6 +78,7 @@ REPORT_DIR = os.path.abspath(os.path.join(
 PARTITION_SIZE = 16384
 DGraphFin_PARTITION_SIZE = 4096
 Yelp_PARTITION_SIZE = 4096
+Reddit_PARTITION_SIZE = 8192
 
 # Subsample limit removed. With GPU acceleration and graph partitioning,
 # even massive datasets like DGraphFin (3.7M) and Yelp (716K) can be fully processed.
@@ -240,8 +251,67 @@ def load_yelp():
     return data
 
 
+def load_amazon():
+    """Amazon: ~12K nodes, e-commerce review fraud detection.
+    Multi-relational graph (users connected by shared product/rating/text).
+    """
+    root = os.path.join(DATA_ROOT, "Amazon")
+    print("  [Dataset] Amazon (12K nodes, E-commerce Review Fraud)...")
+    dataset = Amazon(root=root, name='Computers')
+    data = dataset[0]
+    data = _repackage_graph(data)
+    data = _inject_outliers(data, contextual_ratio=0.03, structural_ratio=0.02, m_clique=8)
+    return data
+
+
+# ── Blockchain / Trust ──────────────────────────────────────
+
+def load_bitcoin_otc():
+    """Bitcoin-OTC: 5.8K nodes, who-trusts-whom Bitcoin trading network.
+    Uses the last temporal snapshot (most mature trust network).
+    Edge weights represent trust ratings (-10 to +10).
+    """
+    root = os.path.join(DATA_ROOT, "BitcoinOTC")
+    print("  [Dataset] Bitcoin-OTC (5.8K nodes, Trust Network)...")
+    dataset = BitcoinOTC(root=root, edge_window_size=10)
+    # Use last snapshot (most complete graph)
+    data = dataset[-1]
+    
+    # BitcoinOTC has no node features → generate degree-based features
+    from torch_geometric.utils import degree
+    num_nodes = data.num_nodes
+    deg = degree(data.edge_index[0], num_nodes=num_nodes)
+    # Create simple node features: [degree, log_degree, in/out ratio, ...]
+    log_deg = torch.log1p(deg)
+    # Stack a few structural features
+    x = torch.stack([deg, log_deg, deg / (deg.max() + 1e-6)], dim=-1).float()
+    data.x = x
+    data.y = torch.zeros(num_nodes, dtype=torch.long)  # will be overwritten by outlier injection
+    
+    data = _repackage_graph(data)
+    data = _inject_outliers(data, contextual_ratio=0.03, structural_ratio=0.03, m_clique=8)
+    return data
+
+
 # ── Social Network Anomaly ──────────────────────────────────
-# Twitch removed: PyG download URL returns HTTP 404
+
+def load_twitch():
+    """Twitch-EN: 7.1K nodes, Bot/Sybil Detection.
+    Note: The upstream server for this dataset (graphmining.ai) frequently
+    returns HTTP 404 or times out. We catch this to prevent pipeline crashes.
+    """
+    from torch_geometric.datasets import Twitch
+    root = os.path.join(DATA_ROOT, "Twitch")
+    print("  [Dataset] Twitch-EN (7.1K nodes, Bot/Sybil Detection)...")
+    try:
+        dataset = Twitch(root=root, name="EN")
+        data = dataset[0]
+        data = _repackage_graph(data)
+        data = _inject_outliers(data, contextual_ratio=0.02, structural_ratio=0.02, m_clique=8)
+        return data
+    except Exception as e:
+        print(f"  [SKIP] Twitch-EN: Failed to download/load dataset. Upstream server may be down. ({e})")
+        return None
 
 
 def load_flickr():
@@ -285,8 +355,8 @@ def load_planetoid(name):
 # ==========================================
 
 # Models that internally create dense N×N adjacency matrix (via to_dense_adj)
-# DLG also uses to_dense_adj in DLGBase.process_graph + dot-product decoder
-DENSE_ADJ_MODELS = {"DOMINANT", "CONAD", "AnomalyDAE", "DLG"}
+# DLG variants use to_dense_adj in DLGBase.process_graph + dot-product decoder
+DENSE_ADJ_MODELS = {"DOMINANT", "AnomalyDAE", "CONAD", "DLG-Base", "DLG"}
 
 # Available system memory limit (bytes) — 24GB with safety margin
 MAX_MEMORY_BYTES = 20 * 1024 * 1024 * 1024  # 20GB usable out of 24GB
@@ -370,14 +440,13 @@ def evaluate_model(model_class, model_name, data, ds_name, is_dlg=False, epoch=5
     # ── Dense-adj models: use partition-based approach (from legacy_adapter) ──
     ## For DGraphFin and Yelp, use smaller partition sizes to reduce memory usage
     ## This is because they are more dense than other datasets
-    if ds_name == "DGraphFin" :
-        current_partition_size = DGraphFin_PARTITION_SIZE
-    elif ds_name == "Yelp" :
-        current_partition_size = Yelp_PARTITION_SIZE
-    else :
-        current_partition_size = PARTITION_SIZE
-        
-    # current_partition_size = DGraphFin_PARTITION_SIZE if ds_name == "DGraphFin" else PARTITION_SIZE
+    # Per-dataset partition sizes for memory-constrained datasets
+    _partition_sizes = {
+        "DGraphFin": DGraphFin_PARTITION_SIZE,
+        "Yelp":      Yelp_PARTITION_SIZE,
+        "Reddit":    Reddit_PARTITION_SIZE,
+    }
+    current_partition_size = _partition_sizes.get(ds_name, PARTITION_SIZE)
 
     use_partition = (n_nodes > current_partition_size)
 
@@ -501,33 +570,35 @@ def main():
     gpu_id = 0 if torch.cuda.is_available() else -1
 
     # ── Dataset Registry ──────────────────────────────────
-    # Ordered: Fraud/Financial first, then Social, then Citation
+    # Ordered: Fraud/Financial first, Blockchain/Trust, Social, Citation
     datasets = {
         # ── Fraud / AML / Financial ──
-        "Elliptic":   load_elliptic,                            # 46K (full)  Bitcoin AML
-        "DGraphFin":  load_dgraphfin,                           # 3.7M (full) Financial Loan Fraud
-        "Yelp":       load_yelp,                                # 716K (full) Review Spam
+        "Elliptic":    load_elliptic,                            # 46K (full)  Bitcoin AML
+        "DGraphFin":   load_dgraphfin,                           # 3.7M (full) Financial Loan Fraud
+        "Yelp":        load_yelp,                                # 716K (full) Review Spam
+        "Amazon":      load_amazon,                              # 12K (full)  E-commerce Review Fraud
+        # ── Blockchain / Trust ──
+        "BitcoinOTC":  load_bitcoin_otc,                         # 5.8K (full) Bitcoin Trust Network
         # ── Social Network Anomaly ──
-        "Flickr":     load_flickr,                              # 89K (full)  Spam Detection
-        "Reddit":     load_reddit,                              # 233K (full) Sybil/Troll
+        "Flickr":      load_flickr,                              # 89K (full)  Spam Detection
+        "Reddit":      load_reddit,                              # 233K (full) Sybil/Troll
         # ── Citation (Sanity Check) ──
-        "Cora":       lambda: load_planetoid("Cora"),           # 2.7K
-        "CiteSeer":   lambda: load_planetoid("CiteSeer"),       # 3.3K
-        "PubMed":     lambda: load_planetoid("PubMed"),         # 19.7K
+        "Cora":        lambda: load_planetoid("Cora"),           # 2.7K
+        "CiteSeer":    lambda: load_planetoid("CiteSeer"),       # 3.3K
+        "PubMed":      lambda: load_planetoid("PubMed"),         # 19.7K
     }
 
-    # ── Model Registry ────────────────────────────────────
-    # GADNR excluded: incompatible with current PyG version
-    #   (MessagePassing.__init__() got unexpected 'tot_nodes')
+    # ── Model Registry (8 models) ─────────────────────────
     models = {
-        "DOMINANT":   (DOMINANT,   False),
-        "CoLA":       (CoLA,       False),
-        "CONAD":      (CONAD,      False),
-        "OCGNN":      (OCGNN,      False),
-        "DLG":        (DLG,        True),
+        "DOMINANT":    (DOMINANT,    False),
+        "AnomalyDAE":  (AnomalyDAE,  False),
+        "CoLA":        (CoLA,        False),
+        "CONAD":       (CONAD,       False),
+        "GADNR":       (GADNR,       False),
+        "OCGNN":       (OCGNN,       False),
+        "DLG-Base":    (DLGBase,     True),   # L2 only (no L1 pre-training)
+        "DLG":         (DLG,         True),   # Full L1→L2 Decoupled pipeline (ours)
     }
-
-    results_list = []
 
     print("=" * 65)
     print("  SCI Paper Extended Benchmark: DLG vs PyGOD Baselines")
@@ -535,8 +606,60 @@ def main():
     print(f"  Data Root: {DATA_ROOT}")
     print("=" * 65)
 
+    # ── RESUME / LOGGING LOGIC ────────────────────────────
+    completed_datasets = set()
+    completed_pairs = set()       # (dataset, model) pairs already evaluated
+    failed_datasets = set()
+    csv_path = os.path.join(REPORT_DIR, "benchmark_8x10_results.csv")
+    fail_log_path = os.path.join(REPORT_DIR, "failed_datasets.log")
+
+    if os.path.exists(fail_log_path):
+        with open(fail_log_path, 'r') as f:
+            failed_datasets = set(line.strip() for line in f if line.strip())
+
+    if os.path.exists(csv_path):
+        try:
+            df_existing = pd.read_csv(csv_path)
+            results_list = df_existing.to_dict('records')
+            
+            # Build set of completed (dataset, model) pairs for fine-grained skip
+            for _, row in df_existing.iterrows():
+                completed_pairs.add((row['Dataset'], row['Model']))
+            
+            # Check which datasets have all models evaluated
+            for ds in df_existing['Dataset'].unique():
+                ds_models = df_existing[df_existing['Dataset'] == ds]['Model'].nunique()
+                if ds_models >= len(models):
+                    completed_datasets.add(ds)
+            
+            n_partial = len(completed_pairs) - len(completed_datasets) * len(models)
+            print(f"  [Resume] Loaded {len(results_list)} previous results.")
+            print(f"  [Resume] Completed datasets (will skip entirely): {', '.join(completed_datasets) if completed_datasets else 'None'}")
+            if n_partial > 0:
+                partial_ds = {ds for ds, _ in completed_pairs if ds not in completed_datasets}
+                for pds in partial_ds:
+                    done_models = [m for d, m in completed_pairs if d == pds]
+                    print(f"  [Resume] {pds}: {len(done_models)}/{len(models)} models done → will skip: {', '.join(done_models)}")
+            print(f"  [Resume] Failed datasets (will skip): {', '.join(failed_datasets) if failed_datasets else 'None'}")
+        except Exception as e:
+            print(f"  [Resume] Failed to parse existing CSV: {e}")
+            results_list = []
+    else:
+        results_list = []
+
     for ds_name, ds_loader in datasets.items():
         print(f"\n{'─' * 65}")
+        
+        if ds_name in completed_datasets:
+            print(f"  📊 Dataset: {ds_name} [ALREADY BENCHMARKED - SKIPPING]")
+            print(f"{'─' * 65}")
+            continue
+            
+        if ds_name in failed_datasets:
+            print(f"  📊 Dataset: {ds_name} [PREVIOUSLY FAILED - SKIPPING]")
+            print(f"{'─' * 65}")
+            continue
+            
         print(f"  📊 Dataset: {ds_name}")
         print(f"{'─' * 65}")
 
@@ -545,10 +668,15 @@ def main():
         except Exception as e:
             print(f"  [SKIP] Failed to load {ds_name}: {e}")
             traceback.print_exc()
+            with open(fail_log_path, 'a') as f:
+                f.write(f"{ds_name}\n")
             continue
 
         if data is None:
-            continue  # e.g., DGraphFin not downloaded
+            # Also log as failed so we don't retry downloading next time
+            with open(fail_log_path, 'a') as f:
+                f.write(f"{ds_name}\n")
+            continue
 
         # Count anomalies correctly (handle Elliptic where y∈{0,1,2})
         if hasattr(data, 'eval_mask') and data.eval_mask is not None:
@@ -562,6 +690,11 @@ def main():
               f"Anomalies: {n_anomalies:,} ({n_anomalies/n_total*100:.1f}%)")
 
         for model_name, (model_class, is_dlg) in models.items():
+            # Skip models already evaluated for this dataset (fine-grained resume)
+            if (ds_name, model_name) in completed_pairs:
+                print(f"    [{model_name}] ⏭ already evaluated — skipping")
+                continue
+
             res = evaluate_model(model_class, model_name, data, ds_name=ds_name, is_dlg=is_dlg, epoch=50, gpu_id=gpu_id)
             res["Dataset"] = ds_name
             res["Model"] = model_name
@@ -576,6 +709,35 @@ def main():
         # Save intermediate results after each dataset (in case of crash)
         _save_results(results_list)
 
+        # ── CUDA recovery: detect & recover from corrupted GPU state ──
+        # A single CUDA illegal memory access corrupts ALL subsequent GPU ops
+        # in the same process. We detect this and reset.
+        if torch.cuda.is_available():
+            try:
+                _probe = torch.zeros(1, device='cuda:0')
+                del _probe
+            except RuntimeError:
+                print("  ⚠ CUDA state corrupted — resetting GPU device...")
+                try:
+                    torch.cuda.synchronize()
+                except:
+                    pass
+                torch.cuda.empty_cache()
+                gc.collect()
+                # Force re-check on next evaluate_model call
+                global CUDA_AVAILABLE
+                CUDA_AVAILABLE = None
+                # In some cases, the only way to recover is to skip to CPU
+                # for the remaining datasets. We try GPU first.
+                try:
+                    _probe2 = torch.zeros(1, device='cuda:0')
+                    del _probe2
+                    print("  ✓ CUDA recovered successfully.")
+                except RuntimeError:
+                    print("  ✗ CUDA unrecoverable. Remaining datasets will use CPU.")
+                    CUDA_AVAILABLE = False
+                    gpu_id = -1
+
     # Final save
     _save_results(results_list, final=True)
 
@@ -588,7 +750,7 @@ def _save_results(results_list, final=False):
     df = df[[c for c in cols if c in df.columns]]
 
     os.makedirs(REPORT_DIR, exist_ok=True)
-    csv_path = os.path.join(REPORT_DIR, "benchmark_6x9_results.csv")
+    csv_path = os.path.join(REPORT_DIR, "benchmark_8x10_results.csv")
     df.to_csv(csv_path, index=False)
 
     if final:
