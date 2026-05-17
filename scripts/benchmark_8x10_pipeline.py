@@ -270,24 +270,72 @@ def load_bitcoin_otc():
     """Bitcoin-OTC: 5.8K nodes, who-trusts-whom Bitcoin trading network.
     Uses the last temporal snapshot (most mature trust network).
     Edge weights represent trust ratings (-10 to +10).
+
+    Node features are generated via Node2Vec (64-dim structural embedding)
+    concatenated with hand-crafted degree features (3-dim), yielding 67-dim
+    total. This resolves NaN issues in GCN-AE models (DOMINANT, CONAD, DLG-Base)
+    caused by the original 3-dim features being too low-dimensional for stable
+    dense adjacency reconstruction (Z @ Z.T).
     """
     root = os.path.join(DATA_ROOT, "BitcoinOTC")
     print("  [Dataset] Bitcoin-OTC (5.8K nodes, Trust Network)...")
     dataset = BitcoinOTC(root=root, edge_window_size=10)
     # Use last snapshot (most complete graph)
     data = dataset[-1]
-    
-    # BitcoinOTC has no node features → generate degree-based features
+
     from torch_geometric.utils import degree
+    from torch_geometric.nn import Node2Vec
+
     num_nodes = data.num_nodes
-    deg = degree(data.edge_index[0], num_nodes=num_nodes)
-    # Create simple node features: [degree, log_degree, in/out ratio, ...]
+    edge_index = data.edge_index
+
+    # ── 1. Node2Vec embedding (64-dim) ──
+    print("    ↳ Training Node2Vec (64-dim, 100 epochs)...", end=" ", flush=True)
+    n2v_device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    node2vec = Node2Vec(
+        edge_index,
+        embedding_dim=64,
+        walk_length=20,
+        context_size=10,
+        walks_per_node=10,
+        num_negative_samples=1,
+        p=1.0,
+        q=1.0,
+        num_nodes=num_nodes,
+    ).to(n2v_device)
+
+    loader = node2vec.loader(batch_size=256, shuffle=True, num_workers=0)
+    optimizer = torch.optim.Adam(list(node2vec.parameters()), lr=0.01)
+
+    node2vec.train()
+    for epoch in range(1, 101):
+        total_loss = 0
+        for pos_rw, neg_rw in loader:
+            optimizer.zero_grad()
+            loss = node2vec.loss(pos_rw.to(n2v_device), neg_rw.to(n2v_device))
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+    node2vec.eval()
+    with torch.no_grad():
+        n2v_emb = node2vec().detach().cpu()  # (num_nodes, 64)
+    print(f"Done (shape={n2v_emb.shape})")
+
+    # ── 2. Hand-crafted structural features (3-dim) ──
+    deg = degree(edge_index[0], num_nodes=num_nodes)
     log_deg = torch.log1p(deg)
-    # Stack a few structural features
-    x = torch.stack([deg, log_deg, deg / (deg.max() + 1e-6)], dim=-1).float()
+    struct_feat = torch.stack([
+        deg,
+        log_deg,
+        deg / (deg.max() + 1e-6),
+    ], dim=-1).float()
+
+    # ── 3. Concatenate: [Node2Vec(64) | struct(3)] → 67-dim ──
+    x = torch.cat([n2v_emb, struct_feat], dim=-1).float()
     data.x = x
     data.y = torch.zeros(num_nodes, dtype=torch.long)  # will be overwritten by outlier injection
-    
+
     data = _repackage_graph(data)
     data = _inject_outliers(data, contextual_ratio=0.03, structural_ratio=0.03, m_clique=8)
     return data
@@ -742,6 +790,157 @@ def main():
     _save_results(results_list, final=True)
 
 
+
+def _compute_and_display_scoring(csv_path):
+    """Compute model rankings using Average Rank (Friedman-style) scoring.
+
+    Scoring Method:
+    ───────────────
+    1. For each (dataset, metric) pair, rank all models 1→N (1=best).
+       ERR values receive the worst rank (N).
+    2. Average ranks across all datasets → per-metric average rank.
+    3. Composite score = weighted average of per-metric ranks:
+         ROC-AUC (40%) + PR-AUC (35%) + F1-Score (25%)
+       Weights reflect typical SCI paper importance ordering.
+    4. Also count: #Wins (1st place) and #Top-3 finishes.
+    """
+    import numpy as np
+
+    df = pd.read_csv(csv_path)
+
+    # Filter to numeric-only results (skip ERR rows)
+    metrics = ["ROC-AUC", "PR-AUC", "F1-Score"]
+    models = df["Model"].unique().tolist()
+    datasets = df["Dataset"].unique().tolist()
+
+    # ── Per-dataset ranking ──────────────────────────────────
+    rank_records = []  # {Model, Dataset, metric_rank, ...}
+
+    for ds in datasets:
+        ds_df = df[df["Dataset"] == ds].copy()
+
+        for metric in metrics:
+            # Convert to numeric, ERR → NaN
+            ds_df[metric] = pd.to_numeric(ds_df[metric], errors="coerce")
+
+        for metric in metrics:
+            # Rank: higher score = better = lower rank number
+            # NaN (ERR) gets the worst rank
+            ds_df[f"{metric}_rank"] = ds_df[metric].rank(
+                ascending=False, method="min", na_option="bottom"
+            )
+
+        for _, row in ds_df.iterrows():
+            rec = {
+                "Model": row["Model"],
+                "Dataset": ds,
+            }
+            for metric in metrics:
+                rec[f"{metric}_rank"] = row[f"{metric}_rank"]
+                rec[f"{metric}_val"] = row[metric]
+            rank_records.append(rec)
+
+    rank_df = pd.DataFrame(rank_records)
+
+    # ── Aggregate per model ──────────────────────────────────
+    agg = {}
+    for model in models:
+        m_df = rank_df[rank_df["Model"] == model]
+        n_datasets = len(m_df)
+
+        avg_ranks = {}
+        wins = 0
+        top3 = 0
+
+        for metric in metrics:
+            col_rank = f"{metric}_rank"
+            col_val = f"{metric}_val"
+            ranks = m_df[col_rank].values
+            avg_ranks[metric] = np.nanmean(ranks)
+
+            # Count wins (rank == 1) and top-3
+            wins += int((ranks == 1).sum())
+            top3 += int((ranks <= 3).sum())
+
+        # Composite weighted rank
+        composite = (
+            avg_ranks["ROC-AUC"] * 0.40
+            + avg_ranks["PR-AUC"] * 0.35
+            + avg_ranks["F1-Score"] * 0.25
+        )
+
+        # Average actual metric values (ignoring NaN/ERR)
+        avg_vals = {}
+        for metric in metrics:
+            vals = m_df[f"{metric}_val"].dropna().values
+            avg_vals[metric] = np.mean(vals) if len(vals) > 0 else float("nan")
+
+        agg[model] = {
+            "Avg ROC-AUC Rank": round(avg_ranks["ROC-AUC"], 2),
+            "Avg PR-AUC Rank": round(avg_ranks["PR-AUC"], 2),
+            "Avg F1 Rank": round(avg_ranks["F1-Score"], 2),
+            "Composite Rank": round(composite, 2),
+            "Avg ROC-AUC": round(avg_vals["ROC-AUC"], 4),
+            "Avg PR-AUC": round(avg_vals["PR-AUC"], 4),
+            "Avg F1": round(avg_vals["F1-Score"], 4),
+            "#Wins": wins,
+            "#Top-3": top3,
+            "Datasets": n_datasets,
+        }
+
+    # ── Display ──────────────────────────────────────────────
+    score_df = pd.DataFrame(agg).T
+    score_df.index.name = "Model"
+    score_df = score_df.sort_values("Composite Rank", ascending=True)
+
+    print(f"\n{'═' * 100}")
+    print("                         MODEL LEADERBOARD (Average Rank Scoring)")
+    print(f"{'═' * 100}")
+    print(f"  Scoring: ROC-AUC rank (40%) + PR-AUC rank (35%) + F1 rank (25%)")
+    print(f"  Lower composite rank = better overall performance across {len(datasets)} datasets")
+    print(f"{'─' * 100}")
+
+    # Leaderboard table
+    header = f"{'Rank':>4}  {'Model':<12} {'Composite':>9} {'ROC Rank':>9} {'PR Rank':>8} {'F1 Rank':>8} {'#Wins':>6} {'#Top3':>6} {'Avg AUC':>8} {'Avg PR':>7} {'Avg F1':>7}"
+    print(header)
+    print(f"{'─' * 100}")
+
+    for i, (model, row) in enumerate(score_df.iterrows(), 1):
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, "  ")
+        print(
+            f"{medal}{i:>2}  {model:<12} "
+            f"{row['Composite Rank']:>9.2f} "
+            f"{row['Avg ROC-AUC Rank']:>9.2f} "
+            f"{row['Avg PR-AUC Rank']:>8.2f} "
+            f"{row['Avg F1 Rank']:>8.2f} "
+            f"{row['#Wins']:>6.0f} "
+            f"{row['#Top-3']:>6.0f} "
+            f"{row['Avg ROC-AUC']:>8.4f} "
+            f"{row['Avg PR-AUC']:>7.4f} "
+            f"{row['Avg F1']:>7.4f}"
+        )
+
+    print(f"{'═' * 100}")
+
+    # ── Per-dataset breakdown ────────────────────────────────
+    print(f"\n{'─' * 80}")
+    print("  Per-Dataset Best Model (by ROC-AUC)")
+    print(f"{'─' * 80}")
+    for ds in datasets:
+        ds_ranks = rank_df[(rank_df["Dataset"] == ds) & (rank_df["ROC-AUC_rank"] == 1)]
+        if len(ds_ranks) > 0:
+            best = ds_ranks.iloc[0]
+            print(f"  {ds:<12} → {best['Model']:<12} (AUC={best['ROC-AUC_val']:.4f})")
+    print(f"{'─' * 80}")
+
+    # Save scoring to CSV
+    score_csv = csv_path.replace("_results.csv", "_scoring.csv")
+    score_df.to_csv(score_csv)
+    print(f"\n📊 Scoring saved to: {score_csv}")
+
+    return score_df
+
+
 def _save_results(results_list, final=False):
     """Save results to CSV, overwriting each time."""
     df = pd.DataFrame(results_list)
@@ -759,6 +958,9 @@ def _save_results(results_list, final=False):
         print(f"{'=' * 65}")
         print(df.to_string(index=False))
         print(f"\n📁 Results saved to: {csv_path}")
+
+        # ── Compute and display model scoring/leaderboard ──
+        _compute_and_display_scoring(csv_path)
 
 
 if __name__ == "__main__":
